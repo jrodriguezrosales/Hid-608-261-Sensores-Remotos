@@ -1,0 +1,112 @@
+/**
+ * Título: Evaluación Multitemporal del Embalse Valle de Bravo en GEE
+ * Autor: José Rodríguez Rosales 
+ * Curso: HID-608-Introducción a los Sensores Remotos 
+ * Profesor: Dr. Felipe Pedraza Oropeza
+ * Fecha: abril 2026
+ */
+
+// 1. DEFINIR EL ÁREA DE ESTUDIO USANDO EL SHAPEFILE
+var cuenca = ee.FeatureCollection("projects/hid608/assets/valle_de_bravo_14n");
+var roi = cuenca.geometry(); 
+
+Map.centerObject(roi, 13);
+Map.addLayer(ee.Image().paint(cuenca, 1, 2), {palette: 'red'}, 'Límite Valle de Bravo');
+
+// 2. FUNCIÓN PARA PREPARAR IMÁGENES (Factor de escala)
+// Esta es la función que te faltaba
+var prepLandsat = function(image) {
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  // Reemplazamos las bandas crudas por las escaladas, manteniendo metadatos
+  return image.addBands(opticalBands, null, true); 
+};
+
+// 3. CARGAR COLECCIONES 2025 — LANDSAT 8 + 9
+var l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+  .filterBounds(roi)
+  .filterDate('2025-01-01', '2025-12-31')
+  .filter(ee.Filter.eq('WRS_PATH', 27))
+  .filter(ee.Filter.eq('WRS_ROW', 47))
+  .filter(ee.Filter.lt('CLOUD_COVER', 10)); // Filtro de nubes general
+
+var l9 = ee.ImageCollection("LANDSAT/LC09/C02/T1_L2")
+  .filterBounds(roi)
+  .filterDate('2025-01-01', '2025-12-31')
+  .filter(ee.Filter.eq('WRS_PATH', 27))
+  .filter(ee.Filter.eq('WRS_ROW', 47))
+  .filter(ee.Filter.lt('CLOUD_COVER', 10));
+
+// 4. FUSIONAR Y PROCESAR LA SERIE DE TIEMPO
+// Hacemos el cálculo una sola vez para optimizar memoria
+var col2025 = l8.merge(l9)
+  .sort('system:time_start')
+  .map(function(img) {
+    var prepped = prepLandsat(img); 
+    
+    // Calcular NDWI y crear máscara (usa 0.05 o 0.0 según lo que hayas decidido)
+    var ndwi = prepped.normalizedDifference(['SR_B3', 'SR_B5']).rename('NDWI');
+    var waterMask = ndwi.gt(0.05);
+
+    // Calcular el área en hectáreas como un número (escalar)
+    var areaHa = ee.Image.pixelArea()
+      .updateMask(waterMask)
+      .reduceRegion({
+        reducer: ee.Reducer.sum(),
+        geometry: roi,
+        scale: 30,
+        maxPixels: 1e9
+      }).getNumber('area').divide(10000);
+
+    // Conteo de píxeles válidos para descartar imágenes con errores o nubes locales
+    var validPixels = prepped.select('SR_B3')
+      .reduceRegion({
+        reducer: ee.Reducer.count(),
+        geometry: roi,
+        scale: 30,
+        maxPixels: 1e9
+      }).getNumber('SR_B3');
+
+    // Retornar una feature (sin geometría espacial para aligerar) con las propiedades necesarias
+    return ee.Feature(null, {
+      'system:time_start': img.get('system:time_start'),
+      'Fecha': ee.Date(img.get('system:time_start')).format('YYYY-MM-dd'),
+      'Satelite': img.get('SPACECRAFT_ID'),
+      'Area_ha': areaHa,
+      'valid_pixels': validPixels
+    });
+  })
+  // Filtramos para quitar imágenes que tengan muy pocos píxeles útiles (ej. cortadas por el borde)
+  .filter(ee.Filter.gt('valid_pixels', 5000));
+
+print('Escenas totales útiles (L8 + L9):', col2025.size());
+
+// 5. GRÁFICA SERIE DE TIEMPO
+// Al usar byFeature, Earth Engine grafica mucho más rápido porque ya calculamos el área
+var chart = ui.Chart.feature.byFeature({
+  features: col2025,
+  xProperty: 'system:time_start',
+  yProperties: ['Area_ha']
+}).setOptions({
+  title: 'Dinámica Superficie Lago Valle de Bravo — 2025',
+  hAxis: {title: 'Fecha', format: 'MMM-yy'},
+  vAxis: {title: 'Superficie (Hectáreas)', minValue: 1000}, // Ajusté el mínimo para que la curva se vea más pronunciada
+  lineWidth: 2,
+  pointSize: 5,
+  colors: ['#0047AB'],
+  trendlines: {
+    0: {color: 'red', lineWidth: 1, opacity: 0.5, showR2: true, visibleInLegend: true}
+  }
+});
+
+print('=== SERIE ANUAL 2025 ===');
+print(chart);
+
+// 6. TABLA DE DATOS
+var tabla = ui.Chart.feature.byFeature({
+  features: col2025,
+  xProperty: 'Fecha',
+  yProperties: ['Area_ha', 'Satelite']
+}).setChartType('Table');
+
+print('=== TABLA DE ÁREAS ===');
+print(tabla);
