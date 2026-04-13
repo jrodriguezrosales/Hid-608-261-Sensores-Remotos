@@ -1,0 +1,91 @@
+// 1. CARGAR EL SHP DEL LAGO Y PREPARAR DATOS
+var cuenca = ee.FeatureCollection("projects/hid608/assets/valle_de_bravo_14n");
+var roi = cuenca.geometry(); 
+
+// --- AQUÍ ASUMIMOS QUE DIBUJASTE TUS PUNTOS EN EL MAPA ---
+// agua_training: FeatureCollection de puntos sobre el agua
+// no_agua_training: FeatureCollection de puntos fuera del agua
+
+// Asignamos la clase 1 al agua y 0 a lo que no es agua
+var agua = agua_training.map(function(f) { return f.set('clase', 1); });
+var no_agua = no_agua_training.map(function(f) { return f.set('clase', 0); });
+
+// Unimos los puntos de entrenamiento
+var puntosEntrenamiento = agua.merge(no_agua);
+
+// 2. FUNCIÓN DE PREPARACIÓN (Igual que antes)
+var prepLandsat = function(image) {
+  var qa = image.select('QA_PIXEL');
+  var cloudShadowBitMask = (1 << 4);
+  var cloudsBitMask = (1 << 3);
+  var dilatedCloudBitMask = (1 << 1);
+  var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+    .and(qa.bitwiseAnd(cloudsBitMask).eq(0))
+    .and(qa.bitwiseAnd(dilatedCloudBitMask).eq(0));
+
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  // Añadimos el NDWI como una "banda extra" para ayudar al modelo a decidir
+  var imgFinal = image.addBands(opticalBands, null, true).updateMask(mask);
+  var ndwi = imgFinal.normalizedDifference(['SR_B3', 'SR_B5']).rename('NDWI');
+  
+  return imgFinal.addBands(ndwi); 
+};
+
+// 3. SELECCIONAR UNA IMAGEN LIMPIA PARA ENTRENAR EL MODELO
+// Usamos una imagen de noviembre que sabemos que está clara y el lago está lleno
+var imgEntrenamiento = prepLandsat(ee.Image("LANDSAT/LC09/C02/T1_L2/LC09_027047_20251112"));
+
+// Bandas que usará el Random Forest para aprender (Reflectancias + NDWI)
+var bandasEntrenamiento = ['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7', 'NDWI'];
+
+// Extraer los valores de los píxeles donde pusiste tus puntos
+var trainingData = imgEntrenamiento.select(bandasEntrenamiento).sampleRegions({
+  collection: puntosEntrenamiento,
+  properties: ['clase'],
+  scale: 30
+});
+
+// 4. ENTRENAR EL RANDOM FOREST (100 árboles)
+var clasificadorRF = ee.Classifier.smileRandomForest(100).train({
+  features: trainingData,
+  classProperty: 'clase',
+  inputProperties: bandasEntrenamiento
+});
+
+// Imprimir la precisión del modelo en la consola (Confusion Matrix)
+print('Precisión del RF en entrenamiento:', clasificadorRF.confusionMatrix().accuracy());
+
+// 5. APLICAR EL MODELO A TODA LA SERIE 2025
+var l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").filterBounds(roi).filterDate('2025-01-01', '2025-12-31').filter(ee.Filter.lt('CLOUD_COVER', 30));
+var l9 = ee.ImageCollection("LANDSAT/LC09/C02/T1_L2").filterBounds(roi).filterDate('2025-01-01', '2025-12-31').filter(ee.Filter.lt('CLOUD_COVER', 30));
+
+var col2025_RF = l8.merge(l9).sort('system:time_start')
+  .map(function(img) {
+    var prepped = prepLandsat(img); 
+    
+    // Aquí ocurre la magia: Clasificamos la imagen y nos quedamos solo con la clase 1 (Agua)
+    var clasificada = prepped.select(bandasEntrenamiento).classify(clasificadorRF);
+    var waterMask = clasificada.eq(1); 
+
+    var areaHa = ee.Image.pixelArea().updateMask(waterMask)
+      .reduceRegion({
+        reducer: ee.Reducer.sum(), geometry: roi, scale: 30, maxPixels: 1e9
+      }).getNumber('area').divide(10000);
+
+    return ee.Feature(null, {
+      'system:time_start': img.get('system:time_start'),
+      'Fecha': ee.Date(img.get('system:time_start')).format('YYYY-MM-dd'),
+      'Area_ha': areaHa
+    });
+  }).filter(ee.Filter.gt('Area_ha', 1200));
+
+// 6. GRAFICAR RESULTADOS DEL APRENDIZAJE SUPERVISADO
+var chartRF = ui.Chart.feature.byFeature(col2025_RF, 'system:time_start', 'Area_ha')
+  .setOptions({
+    title: 'Dinámica Superficie (Segmentación Random Forest) — 2025',
+    hAxis: {title: 'Fecha', format: 'MMM-yy'},
+    vAxis: {title: 'Superficie (ha)'}, lineWidth: 2, pointSize: 6, colors: ['#2ca02c']
+  });
+
+print('=== SERIE ANUAL (RANDOM FOREST) ===');
+print(chartRF);
