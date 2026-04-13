@@ -1,0 +1,54 @@
+/**
+ * Título: Evaluación Multitemporal del Embalse Valle de Bravo
+ * Autor: José Rodríguez Rosales 
+ * Curso: HID-608-Introducción a los Sensores Remotos
+ * Profesor: Dr. Felipe Pedraza Oropeza
+ * Fecha:  abril 2026
+ */
+
+// 1. DEFINIR EL ÁREA DE ESTUDIO (VALLE DE BRAVO)
+var roi = ee.Geometry.Point([-100.12, 19.19]).buffer(8000).bounds();
+Map.centerObject(roi, 13);
+
+// 2. CARGAR EXACTAMENTE TUS DOS IMÁGENES POR ID
+// Estas son las que usaste en QGIS
+var id1 = "LANDSAT/LC09/C02/T1_L2/LC09_027047_20250605";
+var id2 = "LANDSAT/LC09/C02/T1_L2/LC09_027047_20251112";
+
+var img1 = ee.Image(id1);
+var img2 = ee.Image(id2);
+
+// 3. FUNCIÓN PARA PROCESAR CUALQUIER IMAGEN LANDSAT 9
+var processImage = function(image) {
+  // Aplicar factor de escala (Obligatorio en Colección 2 Nivel 2)
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  
+  // Calcular NDWI (Verde: B3, NIR: B5)
+  var ndwi = opticalBands.normalizedDifference(['SR_B3', 'SR_B5']).rename('NDWI');
+  
+  // Aplicar tu umbral validado de 0.05
+  var waterMask = ndwi.gt(0.05).selfMask(); // selfMask hace transparente lo que no es agua
+  
+  // Calcular área en hectáreas
+  var area = ee.Image.pixelArea().updateMask(waterMask)
+    .reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: roi,
+      scale: 30,
+      maxPixels: 1e9
+    }).getNumber('area').divide(10000);
+    
+  return {mask: waterMask, area: area, date: image.date().format('YYYY-MM-DD')};
+};
+
+// 4. EJECUTAR PARA TUS DOS IMÁGENES ESPECÍFICAS
+var res1 = processImage(img1);
+var res2 = processImage(img2);
+
+// Imprimir resultados para comparar con QGIS
+print('--- RESULTADOS VALIDACIÓN (Tus imágenes) ---');
+print(ee.String('Imagen Junio: ').cat(res1.date), res1.area, 'ha');
+print(ee.String('Imagen Noviembre: ').cat(res2.date), res2.area, 'ha');
+
+Map.addLayer(res1.mask, {palette: ['blue']}, 'Agua Junio (Validación)');
+Map.addLayer(res2.mask, {palette: ['cyan']}, 'Agua Noviembre (Validación)');
