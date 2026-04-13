@@ -1,0 +1,63 @@
+/**
+ * Título: Evaluación Multitemporal del Embalse Valle de Bravo en GEE
+ * Autor: José Rodríguez Rosales 
+ * Curso: HID-608-Introducción a los Sensores Remotos 
+ * Profesor: Dr. Felipe Pedraza Oropeza
+ * Fecha: abril 2026
+ */
+
+// 1. DEFINIR EL ÁREA DE ESTUDIO USANDO EL SHAPEFILE
+var cuenca = ee.FeatureCollection("projects/hid608/assets/valle_de_bravo_14n");
+var roi = cuenca.geometry(); 
+
+// Extraemos la geometría del shapefile para usarla en los cálculos
+var roi = cuenca.geometry(); 
+
+// Centrar el mapa en tu shapefile
+Map.centerObject(roi, 13);
+// Añadir el contorno al mapa para que verifiques visualmente que está bien cargado
+Map.addLayer(ee.Image().paint(cuenca, 1, 2), {palette: 'red'}, 'Límite Valle de Bravo');
+
+// 2. CARGAR EXACTAMENTE TUS DOS IMÁGENES POR ID
+var id1 = "LANDSAT/LC09/C02/T1_L2/LC09_027047_20250605";
+var id2 = "LANDSAT/LC09/C02/T1_L2/LC09_027047_20251112";
+
+var img1 = ee.Image(id1);
+var img2 = ee.Image(id2);
+
+// 3. FUNCIÓN PARA PROCESAR CUALQUIER IMAGEN LANDSAT 9
+var processImage = function(image) {
+  // Aplicar factor de escala (Obligatorio en Colección 2 Nivel 2)
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  
+  // Calcular NDWI (Verde: B3, NIR: B5)
+  var ndwi = opticalBands.normalizedDifference(['SR_B3', 'SR_B5']).rename('NDWI');
+  
+  // Aplicar tu umbral. 
+  // Nota: Si en QGIS el agua empezaba en > 0.0, puedes cambiar este 0.05 por 0.0
+  var waterMask = ndwi.gt(0.05).selfMask(); 
+  
+  // Calcular área en hectáreas recortando EXCLUSIVAMENTE a tu shapefile
+  var area = ee.Image.pixelArea().updateMask(waterMask)
+    .reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: roi,      // Aquí es donde la magia ocurre usando tu polígono
+      scale: 30,
+      maxPixels: 1e9
+    }).getNumber('area').divide(10000);
+    
+  return {mask: waterMask, area: area, date: image.date().format('YYYY-MM-DD')};
+};
+
+// 4. EJECUTAR PARA TUS DOS IMÁGENES ESPECÍFICAS
+var res1 = processImage(img1);
+var res2 = processImage(img2);
+
+// Imprimir resultados
+print('--- RESULTADOS USANDO SHAPEFILE ---');
+print(ee.String('Imagen Junio: ').cat(res1.date), res1.area, 'ha');
+print(ee.String('Imagen Noviembre: ').cat(res2.date), res2.area, 'ha');
+
+// Mostrar en el mapa
+Map.addLayer(res1.mask.clip(roi), {palette: ['blue']}, 'Agua Junio');
+Map.addLayer(res2.mask.clip(roi), {palette: ['cyan']}, 'Agua Noviembre');
