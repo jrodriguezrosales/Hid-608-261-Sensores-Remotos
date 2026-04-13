@@ -1,0 +1,115 @@
+/**
+ * Título: Evaluación Multitemporal del Embalse Valle de Bravo en GEE
+ * Autor: José Rodríguez Rosales 
+ * Curso: HID-608-Introducción a los Sensores Remotos 
+ * Profesor: Dr. Felipe Pedraza Oropeza
+ * Fecha: abril 2026
+ */
+
+// 1. DEFINIR EL ÁREA DE ESTUDIO USANDO TU SHAPEFILE
+var cuenca = ee.FeatureCollection("projects/hid608/assets/valle_de_bravo_14n");
+var roi = cuenca.geometry(); 
+
+Map.centerObject(roi, 13);
+Map.addLayer(ee.Image().paint(cuenca, 1, 2), {palette: 'red'}, 'Límite Valle de Bravo');
+
+// 2. FUNCIÓN MEJORADA PARA PREPARAR IMÁGENES (Banda QA y Factor de escala)
+var prepLandsat = function(image) {
+  // A. Extraer la banda de calidad
+  var qa = image.select('QA_PIXEL');
+  
+  // B. Definir los bits de nubes y sombras según el manual de Landsat Colección 2
+  var cloudShadowBitMask = (1 << 4);
+  var cloudsBitMask = (1 << 3);
+  var dilatedCloudBitMask = (1 << 1);
+  
+  // C. Crear una máscara donde esos bits sean 0 (es decir, condiciones despejadas)
+  var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+    .and(qa.bitwiseAnd(cloudsBitMask).eq(0))
+    .and(qa.bitwiseAnd(dilatedCloudBitMask).eq(0));
+
+  // D. Aplicar el factor de escala óptico
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  
+  // Retornar la imagen con valores reales y enmascarando los píxeles nublados
+  return image.addBands(opticalBands, null, true).updateMask(mask); 
+};
+
+// 3. CARGAR COLECCIONES 2025 — LANDSAT 8 + 9
+var l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+  .filterBounds(roi)
+  .filterDate('2025-01-01', '2025-12-31')
+  .filter(ee.Filter.eq('WRS_PATH', 27))
+  .filter(ee.Filter.eq('WRS_ROW', 47))
+  .filter(ee.Filter.lt('CLOUD_COVER', 30)); // Relajamos un poco el filtro general de escena
+
+var l9 = ee.ImageCollection("LANDSAT/LC09/C02/T1_L2")
+  .filterBounds(roi)
+  .filterDate('2025-01-01', '2025-12-31')
+  .filter(ee.Filter.eq('WRS_PATH', 27))
+  .filter(ee.Filter.eq('WRS_ROW', 47))
+  .filter(ee.Filter.lt('CLOUD_COVER', 30));
+
+// 4. FUSIONAR Y PROCESAR LA SERIE DE TIEMPO
+var col2025 = l8.merge(l9)
+  .sort('system:time_start')
+  .map(function(img) {
+    var prepped = prepLandsat(img); 
+    
+    // Calcular NDWI y crear máscara de agua (umbral 0.05)
+    var ndwi = prepped.normalizedDifference(['SR_B3', 'SR_B5']).rename('NDWI');
+    var waterMask = ndwi.gt(0.05);
+
+    // Calcular el área de agua en hectáreas
+    var areaHa = ee.Image.pixelArea()
+      .updateMask(waterMask)
+      .reduceRegion({
+        reducer: ee.Reducer.sum(),
+        geometry: roi,
+        scale: 30,
+        maxPixels: 1e9
+      }).getNumber('area').divide(10000);
+
+    return ee.Feature(null, {
+      'system:time_start': img.get('system:time_start'),
+      'Fecha': ee.Date(img.get('system:time_start')).format('YYYY-MM-dd'),
+      'Satelite': img.get('SPACECRAFT_ID'),
+      'Area_ha': areaHa
+    });
+  })
+  // 5. EL FILTRO ESTADÍSTICO / LÓGICO
+  // Sabemos que el embalse no bajó de ~1,400 ha en todo el año. 
+  // Cualquier valor por debajo de 1,200 ha significa que las nubes taparon el agua. Lo descartamos.
+  .filter(ee.Filter.gt('Area_ha', 1200));
+
+print('Escenas útiles después de aplicar filtros:', col2025.size());
+
+// 6. GRÁFICA SERIE DE TIEMPO LIMPIA
+var chart = ui.Chart.feature.byFeature({
+  features: col2025,
+  xProperty: 'system:time_start',
+  yProperties: ['Area_ha']
+}).setOptions({
+  title: 'Dinámica Superficie Lago Valle de Bravo (Filtrado QA) — 2025',
+  hAxis: {title: 'Fecha', format: 'MMM-yy'},
+  vAxis: {title: 'Superficie (Hectáreas)', minValue: 1300, maxValue: 1800},
+  lineWidth: 2,
+  pointSize: 6,
+  colors: ['#0047AB'],
+  trendlines: {
+    0: {color: '#ff0000', lineWidth: 2, opacity: 0.6, showR2: true, visibleInLegend: true}
+  }
+});
+
+print('=== SERIE ANUAL 2025 (SIN RUIDO) ===');
+print(chart);
+
+// 7. TABLA DE DATOS
+var tabla = ui.Chart.feature.byFeature({
+  features: col2025,
+  xProperty: 'Fecha',
+  yProperties: ['Area_ha', 'Satelite']
+}).setChartType('Table');
+
+print('=== TABLA DE ÁREAS ===');
+print(tabla);
