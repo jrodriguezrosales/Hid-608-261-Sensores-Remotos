@@ -1,3 +1,11 @@
+/**
+ * Título: Evaluación Multitemporal con RF del Embalse Valle de Bravo en GEE
+ * Autor: José Rodríguez Rosales 
+ * Curso: HID-608-Introducción a los Sensores Remotos 
+ * Profesor: Dr. Felipe Pedraza Oropeza
+ * Fecha: abril 2026
+ */
+
 // 1. CARGAR EL SHP DEL LAGO Y PREPARAR DATOS
 var cuenca = ee.FeatureCollection("projects/hid608/assets/valle_de_bravo_14n");
 var roi = cuenca.geometry(); 
